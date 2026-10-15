@@ -1,48 +1,79 @@
 name: Build Android TV APK
 
 on:
-  workflow_dispatch:
   push:
-    branches: [ "main" ]
-
-permissions:
-  contents: read
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    name: Build
+    runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout source
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up JDK 17
+      - name: Set up Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
+          cache: gradle
 
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+      - name: Cache Gradle
+        uses: actions/cache@v4
         with:
-          gradle-version: '8.13'
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
 
-      # 将原来的 Set up Android SDK 与 单独的 sdkmanager 调用，替换为下面这个（并删除后续的 "Install Android SDK packages" 步骤）
-      - name: Set up Android SDK
+      - name: Setup Android SDK (cmdline-tools & platform-tools)
         uses: android-actions/setup-android@v3
         with:
-          api-level: 36
-          build-tools: 36.0.0
+          api-level: 33
+          build-tools: 33.0.2
           components: |
             platform-tools
-            platforms;android-36
+            cmdline-tools;latest
+            platforms;android-33
 
-      - name: Build debug APK
-        run: gradle --no-daemon assembleDebug
+      - name: Ensure SDK manager installed and accept licenses
+        run: |
+          export ANDROID_SDK_ROOT=${{ env.ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk }}
+          # prefer sdkmanager from 'latest', fallback to common paths
+          if [ -x "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" ]; then
+            SDKMANAGER="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          elif [ -x "$ANDROID_SDK_ROOT/cmdline-tools/16.0/bin/sdkmanager" ]; then
+            SDKMANAGER="$ANDROID_SDK_ROOT/cmdline-tools/16.0/bin/sdkmanager"
+          elif [ -x "$ANDROID_SDK_ROOT/tools/bin/sdkmanager" ]; then
+            SDKMANAGER="$ANDROID_SDK_ROOT/tools/bin/sdkmanager"
+          else
+            echo "No sdkmanager binary found; attempting to install cmdline-tools via sdkmanager bootstrap"
+            SDKMANAGER=""
+          fi
 
-      - name: Upload APK artifact
+          if [ -n "$SDKMANAGER" ]; then
+            echo "Using sdkmanager at $SDKMANAGER"
+            yes | "$SDKMANAGER" --install "platform-tools" "cmdline-tools;latest" "platforms;android-33" || true
+            yes | "$SDKMANAGER" --licenses || true
+          else
+            echo "sdkmanager not found after setup-android; continuing (setup-android should have installed cmdline-tools)"
+          fi
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Build APK
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Upload build artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ChinaLiveTV-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
-          if-no-files-found: error
-          retention-days: 14
+          name: apk
+          path: app/build/outputs/**/*.apk
