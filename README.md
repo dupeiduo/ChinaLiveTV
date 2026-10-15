@@ -24,7 +24,7 @@ Official services may offer their own apps or web players, but their web URLs ar
 8. Unzip the artifact to get `app-debug.apk`.
 9. Copy it to a USB drive or transfer it to the TV and install it. On the TV, allow installation from the file manager/source used to open the APK.
 
-The workflow installs JDK 17, Gradle 8.13 and Android SDK packages, then runs `gradle assembleDebug`. The first build needs internet access to download dependencies.
+The workflow installs JDK 17, Gradle 8.13, and Android SDK platform/build tools for API 36, then runs `gradle assembleDebug`. The first build needs internet access to download dependencies.
 
 ## Local build
 
