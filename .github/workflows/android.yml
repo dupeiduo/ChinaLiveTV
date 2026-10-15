@@ -26,8 +26,15 @@ jobs:
         with:
           gradle-version: '8.13'
 
+      # 将原来的 Set up Android SDK 与 单独的 sdkmanager 调用，替换为下面这个（并删除后续的 "Install Android SDK packages" 步骤）
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          api-level: 36
+          build-tools: 36.0.0
+          components: |
+            platform-tools
+            platforms;android-36
 
       - name: Install Android SDK packages
         run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
