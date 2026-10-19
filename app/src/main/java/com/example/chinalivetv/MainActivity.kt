@@ -3,7 +3,6 @@ package com.example.chinalivetv
 import android.app.Activity
 import android.graphics.Color
 import android.graphics.Typeface
-import android.os.Build
 import android.os.Bundle
 import android.view.Gravity
 import android.view.KeyEvent
@@ -19,18 +18,41 @@ import com.google.android.exoplayer2.MediaItem
 import com.google.android.exoplayer2.PlaybackException
 import com.google.android.exoplayer2.Player
 import com.google.android.exoplayer2.ui.PlayerView
+import com.google.android.exoplayer2.upstream.DefaultHttpDataSource
+import okhttp3.Dns
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import org.json.JSONArray
-import java.net.HttpURLConnection
+import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.Socket
-import java.net.URL
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import javax.net.ssl.HttpsURLConnection
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLSocket
 import javax.net.ssl.SSLSocketFactory
 
-data class Channel(val name: String, val category: String, val url: String, val note: String = "")
+data class Channel(
+    val name: String,
+    val category: String,
+    val url: String,
+    val note: String = "",
+    // Fallback lines for the same channel; tried in order when playback fails.
+    val alts: List<String> = emptyList()
+) {
+    val allUrls: List<String> get() = listOf(url) + alts
+}
+// Many home routers hand out IPv6-capable DNS answers while the TV itself has no
+// IPv6 route, which makes the platform network stack fail with ENETUNREACH.
+// Prefer A (IPv4) records and only fall back to whatever the system returns.
+class Ipv4FirstDns : Dns {
+    override fun lookup(hostname: String): List<InetAddress> {
+        val all = Dns.SYSTEM.lookup(hostname)
+        val v4 = all.filterIsInstance<Inet4Address>()
+        return if (v4.isNotEmpty()) v4 else all
+    }
+}
 
 class MainActivity : Activity() {
     private var player: ExoPlayer? = null
@@ -40,10 +62,27 @@ class MainActivity : Activity() {
     private lateinit var adapter: ArrayAdapter<Channel>
     private val channels = mutableListOf<Channel>()
     private var currentIndex = 0
+    private var currentLine = 0
     private val io = Executors.newSingleThreadExecutor()
 
-    // Community-maintained public playlist. Availability and usage rights vary by stream.
-    private val playlistUrl = "https://iptv-org.github.io/iptv/countries/cn.m3u"
+    // Community-maintained public playlists. Every reachable source is fetched
+    // and merged so a dead mirror does not empty the list; each channel keeps
+    // several candidate lines and falls through to the next one on error.
+    private val playlistUrls = listOf(
+        "https://cdn.jsdelivr.net/gh/best-fan/iptv-sources@main/cn_all_status.m3u8",
+        "https://raw.githubusercontent.com/best-fan/iptv-sources/main/cn_all_status.m3u8",
+        "https://iptv-org.github.io/iptv/countries/cn.m3u",
+        "https://cdn.jsdelivr.net/gh/iptv-org/iptv@master/iptv/countries/cn.m3u"
+    )
+
+    // Shared client with IPv4-first DNS, used to download the playlists.
+    // (Playback itself uses ExoPlayer's own data source; almost every stream URL
+    // is a bare IP there, so DNS preference does not matter for playback.)
+    private val http: OkHttpClient = OkHttpClient.Builder()
+        .dns(Ipv4FirstDns())
+        .connectTimeout(12, TimeUnit.SECONDS)
+        .readTimeout(15, TimeUnit.SECONDS)
+        .build()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -62,8 +101,12 @@ class MainActivity : Activity() {
         val json = JSONArray(raw)
         (0 until json.length()).map { i ->
             val o = json.getJSONObject(i)
-            Channel(o.optString("name"), o.optString("category", "其他"), o.optString("url"), o.optString("note"))
-        }
+            val primary = o.optString("url").ifBlank { o.optJSONArray("urls")?.optString(0).orEmpty() }
+            val extras = (0 until (o.optJSONArray("urls")?.length() ?: 0))
+                .map { o.optJSONArray("urls")!!.getString(it) }
+                .filter { it != primary }
+            Channel(o.optString("name"), o.optString("category", "其他"), primary, o.optString("note"), extras)
+        }.filter { it.url.isNotBlank() }
     } catch (_: Exception) { emptyList() }
 
     private fun buildUi() {
@@ -129,26 +172,10 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun setupPlayer() {
-        player = ExoPlayer.Builder(this).build().also { exo ->
-            playerView.player = exo
-            exo.addListener(object : Player.Listener {
-                override fun onPlayerError(error: PlaybackException) {
-                    status.text = "播放失败：${error.errorCodeName}。可尝试其他频道或刷新列表。"
-                }
-                override fun onPlaybackStateChanged(state: Int) {
-                    if (state == Player.STATE_BUFFERING) status.text = "正在连接直播源…"
-                    if (state == Player.STATE_READY) status.text =
-                        "正在播放：${channels.getOrNull(currentIndex)?.name.orEmpty()}\n频道源可用性和授权范围以源站为准。"
-                }
-            })
-        }
-    }
-
-    // Android 4.4 supports TLS 1.2 but does not enable it by default, which breaks
-    // HTTPS playlists and streams. Keep the platform defaults and add TLS 1.2 on top.
+    // Android 4.4 supports TLS 1.2 but leaves it disabled by default, which breaks
+    // HTTPS streams served only over TLS 1.2. Keep platform ciphers, add TLS 1.2.
     private fun enableTls12OnLegacyDevices() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) return
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) return
         try {
             val delegate = SSLContext.getInstance("TLS").apply { init(null, null, null) }.socketFactory
             HttpsURLConnection.setDefaultSSLSocketFactory(object : SSLSocketFactory() {
@@ -176,28 +203,91 @@ class MainActivity : Activity() {
         return socket
     }
 
+    private fun setupPlayer() {
+        // Stream URLs are mostly bare-IP HLS endpoints, so the platform default
+        // data source is fine here; playlists use OkHttp (see loadRemotePlaylist).
+        val dataSourceFactory = DefaultHttpDataSource.Factory()
+            .setUserAgent("ChinaLiveTV/1.0")
+            .setAllowCrossProtocolRedirects(true)
+            .setConnectTimeoutMs(8_000)
+            .setReadTimeoutMs(15_000)
+        player = ExoPlayer.Builder(this)
+            .setDataSourceFactory(dataSourceFactory)
+            .build().also { exo ->
+            // Old TV hardware chokes on the highest rendition; prefer 720p max.
+            exo.trackSelectionParameters = exo.trackSelectionParameters.buildUpon()
+                .setMaxVideoSize(1280, 720).build()
+            playerView.player = exo
+            exo.addListener(object : Player.Listener {
+                override fun onPlayerError(error: PlaybackException) {
+                    // Automatically move to the next mirror line for this channel.
+                    val c = channels.getOrNull(currentIndex)
+                    val next = if (c != null && currentLine + 1 < c.allUrls.size) currentLine + 1 else -1
+                    if (next >= 0) {
+                        runOnUiThread { playChannel(currentIndex, next) }
+                    } else {
+                        status.text = "播放失败：${error.errorCodeName}。该频道已无可用线路，试试其他频道。"
+                    }
+                }
+                override fun onPlaybackStateChanged(state: Int) {
+                    if (state == Player.STATE_BUFFERING) status.text = "正在连接直播源…"
+                    if (state == Player.STATE_READY) status.text =
+                        "正在播放：${channels.getOrNull(currentIndex)?.name.orEmpty()}\n频道源可用性和授权范围以源站为准。"
+                }
+            })
+        }
+    }
+
+    // Fetch every reachable playlist and merge them; channels keep their spare
+    // lines so playback can fall through to a mirror when one stream is dead.
     private fun loadRemotePlaylist() {
         io.execute {
-            try {
-                val conn = (URL(playlistUrl).openConnection() as HttpURLConnection).apply {
-                    connectTimeout = 12000; readTimeout = 15000
-                    setRequestProperty("User-Agent", "ChinaLiveTV/1.0")
+            val errors = mutableListOf<String>()
+            val fetched = mutableListOf<List<Channel>>()
+            for ((idx, url) in playlistUrls.withIndex()) {
+                try {
+                    runOnUiThread { status.text = "正在加载频道列表（源 ${idx + 1}/${playlistUrls.size}）…" }
+                    val body = http.newCall(
+                        Request.Builder().url(url)
+                            .header("User-Agent", "ChinaLiveTV/1.0").build()
+                    ).execute().use { resp ->
+                        if (!resp.isSuccessful) error("HTTP ${resp.code()}")
+                        resp.body()?.string() ?: error("空响应")
+                    }
+                    val parsed = parseM3u(body)
+                    if (parsed.isNotEmpty()) fetched.add(parsed) else errors.add("源${idx + 1}: 空")
+                } catch (e: Exception) {
+                    errors.add("源${idx + 1}: ${e.message ?: "网络错误"}")
                 }
-                val body = try {
-                    if (conn.responseCode !in 200..299) error("HTTP ${conn.responseCode}")
-                    conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
-                } finally { conn.disconnect() }
-                val parsed = parseM3u(body)
-                runOnUiThread {
-                    if (parsed.isNotEmpty()) {
-                        channels.clear(); channels.addAll(parsed); adapter.notifyDataSetChanged()
-                        status.text = "已加载 ${parsed.size} 个公开列表频道。请注意：第三方列表不保证每路信号均可播放或获授权。"
-                    } else status.text = "在线列表中没有解析到频道。可检查网络或使用本地频道配置。"
-                }
-            } catch (e: Exception) {
-                runOnUiThread { status.text = "在线频道列表加载失败：${e.message ?: "网络错误"}。请检查网络。" }
+            }
+            val local = try { loadLocalChannels() } catch (_: Exception) { emptyList<Channel>() }
+            val merged = mergeChannels(fetched + listOf(local))
+            runOnUiThread {
+                if (merged.isNotEmpty()) {
+                    channels.clear(); channels.addAll(merged); adapter.notifyDataSetChanged()
+                    status.text = "共 ${merged.size} 个频道（${fetched.size}/${playlistUrls.size} 个在线源）" +
+                        if (errors.isEmpty()) "" else "。部分源失败：${errors.joinToString("；")}"
+                } else status.text = "在线频道列表加载失败（${errors.joinToString("；")}）。请检查网络。"
             }
         }
+    }
+
+    // Group by channel name: first occurrence sets the primary line, every extra
+    // URL for that name becomes a fallback (capped to avoid huge lists).
+    private fun mergeChannels(lists: List<List<Channel>>): List<Channel> {
+        val map = LinkedHashMap<String, Channel>()
+        for (list in lists) for (c in list) {
+            if (c.url.isBlank()) continue
+            val key = c.name
+            val prev = map[key]
+            if (prev == null) {
+                map[key] = c
+            } else {
+                val lines = (prev.allUrls + c.url + c.alts).distinct().take(4)
+                map[key] = prev.copy(alts = lines.drop(1))
+            }
+        }
+        return map.values.toList()
     }
 
     private fun parseM3u(text: String): List<Channel> {
@@ -225,15 +315,19 @@ class MainActivity : Activity() {
         return result.distinctBy { it.name + "|" + it.url }
     }
 
-    private fun playChannel(index: Int) {
+    private fun playChannel(index: Int, line: Int = 0) {
         if (index !in channels.indices) return
         currentIndex = index
+        currentLine = line
         val c = channels[index]
-        if (c.url.isBlank()) {
+        val urls = c.allUrls
+        if (urls.isEmpty()) {
             status.text = "${c.name}：没有配置可播放地址。"; return
         }
-        status.text = "正在连接：${c.name}"
-        player?.setMediaItem(MediaItem.fromUri(c.url))
+        if (line !in urls.indices) return
+        status.text = "正在连接：${c.name}" +
+            if (urls.size > 1) "（线路 ${line + 1}/${urls.size}）" else ""
+        player?.setMediaItem(MediaItem.fromUri(urls[line]))
         player?.prepare()
         player?.playWhenReady = true
     }

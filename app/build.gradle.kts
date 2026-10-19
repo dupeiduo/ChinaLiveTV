@@ -28,4 +28,8 @@ dependencies {
     implementation("com.google.android.exoplayer:exoplayer-core:$exoPlayerVersion")
     implementation("com.google.android.exoplayer:exoplayer-hls:$exoPlayerVersion")
     implementation("com.google.android.exoplayer:exoplayer-ui:$exoPlayerVersion")
+    // OkHttp 3.12.x is the last line that runs on Android 4.4 and is used only to
+    // download playlists, where we need a custom (IPv4-first) DNS resolver.
+    // NOTE: exoplayer's extension-okhttp pulls okhttp 4.x (API 21+) and must NOT be used here.
+    implementation("com.squareup.okhttp3:okhttp:3.12.13")
 }
