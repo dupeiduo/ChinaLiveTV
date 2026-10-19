@@ -1,6 +1,14 @@
 # ChinaLiveTV — Android TV
 
-Android TV APK starter using Kotlin + AndroidX Media3 ExoPlayer. Includes remote M3U playlist loading and GitHub Actions cloud build workflow.
+Android TV APK starter using Kotlin + ExoPlayer 2.x. Includes remote M3U playlist loading and GitHub Actions cloud build workflow.
+
+## Device compatibility
+
+- **Android 4.4 (API 19) and above.** This is the minimum supported version.
+- Android 5.0+ uses the same player engine; the app theme switches to Material automatically on API 21+.
+- Android 4.0–4.3 (API 14–18) is **not** supported: those releases lack reliable TLS 1.2/HLS support and the MediaCodec APIs the player relies on.
+- Media3 was replaced by ExoPlayer 2.19.1 because Media3 requires Android 5.0 (API 21). HLS playback is still supported.
+- On Android 4.4 the app explicitly enables TLS 1.2 for HTTPS playlists and streams, which KitKat leaves off by default. Very old devices may still fail on servers that require modern TLS/SNI, and some H.265/DRM streams cannot be decoded by the device hardware.
 
 ## Default online playlist
 
@@ -43,5 +51,5 @@ Open the root folder in Android Studio and wait for Gradle sync, then choose **B
 
 - The app loads a community playlist over the internet; the channel list requires internet access.
 - Live-stream endpoints can change or be geo-restricted, and the playlist is not an availability or legal guarantee.
-- Some TV streams may use codecs, DRM, headers, or protocols not supported by this basic player.
+- Some TV streams may use codecs, DRM, headers, or protocols not supported by ExoPlayer 2 on Android 4.4.
 - No stream proxy/server is included.

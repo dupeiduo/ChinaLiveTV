@@ -9,7 +9,7 @@ android {
 
     defaultConfig {
         applicationId = "com.example.chinalivetv"
-        minSdk = 23
+        minSdk = 19
         targetSdk = 35
         versionCode = 1
         versionName = "0.1.0"
@@ -23,8 +23,9 @@ android {
 }
 
 dependencies {
-    val media3Version = "1.11.1"
-    implementation("androidx.media3:media3-exoplayer:$media3Version")
-    implementation("androidx.media3:media3-exoplayer-hls:$media3Version")
-    implementation("androidx.media3:media3-ui:$media3Version")
+    // Media3 requires API 21; ExoPlayer 2 is the last line that runs on Android 4.4.
+    val exoPlayerVersion = "2.19.1"
+    implementation("com.google.android.exoplayer:exoplayer-core:$exoPlayerVersion")
+    implementation("com.google.android.exoplayer:exoplayer-hls:$exoPlayerVersion")
+    implementation("com.google.android.exoplayer:exoplayer-ui:$exoPlayerVersion")
 }

@@ -3,6 +3,7 @@ package com.example.chinalivetv
 import android.app.Activity
 import android.graphics.Color
 import android.graphics.Typeface
+import android.os.Build
 import android.os.Bundle
 import android.view.Gravity
 import android.view.KeyEvent
@@ -13,15 +14,21 @@ import android.widget.LinearLayout
 import android.widget.ListView
 import android.widget.TextView
 import android.widget.Toast
-import androidx.media3.common.MediaItem
-import androidx.media3.common.PlaybackException
-import androidx.media3.common.Player
-import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.ui.PlayerView
+import com.google.android.exoplayer2.ExoPlayer
+import com.google.android.exoplayer2.MediaItem
+import com.google.android.exoplayer2.PlaybackException
+import com.google.android.exoplayer2.Player
+import com.google.android.exoplayer2.ui.PlayerView
 import org.json.JSONArray
 import java.net.HttpURLConnection
+import java.net.InetAddress
+import java.net.Socket
 import java.net.URL
 import java.util.concurrent.Executors
+import javax.net.ssl.HttpsURLConnection
+import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLSocket
+import javax.net.ssl.SSLSocketFactory
 
 data class Channel(val name: String, val category: String, val url: String, val note: String = "")
 
@@ -44,6 +51,7 @@ class MainActivity : Activity() {
             View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
                 View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
         channels.addAll(loadLocalChannels())
+        enableTls12OnLegacyDevices()
         buildUi()
         setupPlayer()
         loadRemotePlaylist()
@@ -135,6 +143,37 @@ class MainActivity : Activity() {
                 }
             })
         }
+    }
+
+    // Android 4.4 supports TLS 1.2 but does not enable it by default, which breaks
+    // HTTPS playlists and streams. Keep the platform defaults and add TLS 1.2 on top.
+    private fun enableTls12OnLegacyDevices() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) return
+        try {
+            val delegate = SSLContext.getInstance("TLS").apply { init(null, null, null) }.socketFactory
+            HttpsURLConnection.setDefaultSSLSocketFactory(object : SSLSocketFactory() {
+                override fun getDefaultCipherSuites(): Array<String> = delegate.defaultCipherSuites
+                override fun getSupportedCipherSuites(): Array<String> = delegate.supportedCipherSuites
+                override fun createSocket(s: Socket, host: String, port: Int, autoClose: Boolean): Socket =
+                    withTls12(delegate.createSocket(s, host, port, autoClose))
+                override fun createSocket(host: String, port: Int): Socket =
+                    withTls12(delegate.createSocket(host, port))
+                override fun createSocket(host: String, port: Int, localHost: InetAddress, localPort: Int): Socket =
+                    withTls12(delegate.createSocket(host, port, localHost, localPort))
+                override fun createSocket(host: InetAddress, port: Int): Socket =
+                    withTls12(delegate.createSocket(host, port))
+                override fun createSocket(host: InetAddress, port: Int, localHost: InetAddress, localPort: Int): Socket =
+                    withTls12(delegate.createSocket(host, port, localHost, localPort))
+            })
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun withTls12(socket: Socket): Socket {
+        if (socket is SSLSocket && socket.supportedProtocols.contains("TLSv1.2")) {
+            socket.enabledProtocols = (socket.enabledProtocols + "TLSv1.2").distinct().toTypedArray()
+        }
+        return socket
     }
 
     private fun loadRemotePlaylist() {
